@@ -191,9 +191,21 @@ export class ChatManager {
 
   // Create a new chat
   async createChat(participantIds: string[], isGroup: boolean = false, name?: string): Promise<Chat> {
-    const currentUser = this.authManager.getCurrentUser();
-    if (!currentUser) {
+    // Get current Supabase user
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
       throw new Error('User not authenticated');
+    }
+
+    // Get current user's profile
+    const { data: currentUserProfile, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, username, public_key')
+      .eq('id', user.id)
+      .single();
+
+    if (profileError || !currentUserProfile) {
+      throw new Error('User profile not found');
     }
 
     try {
@@ -256,27 +268,37 @@ export class ChatManager {
             *,
             chat_participants!inner(user_id)
           `)
-          .eq('is_group', false)
-          .not('chat_participants.user_id', 'is', null);
+          .eq('chats.is_group', false)
+          .in('user_id', [currentUserProfile.id, profileIds[0]]);
           
-        if (existingChat && !existingChatError) {
+        if (existingChats && !existingChatError && existingChats.length > 0) {
           // Check if this chat has exactly the two participants we want
-          for (const chat of existingChat) {
-            const chatParticipants = (chat as any).chat_participants.map((p: any) => p.user_id);
-            if (chatParticipants.length === 2 && 
-                chatParticipants.includes(currentUser.id) && 
-                chatParticipants.includes(profileIds[0])) {
-              // Convert to our Chat interface
-              const existingChatData: Chat = {
-                id: chat.id,
-                name: chat.name,
-                is_group: chat.is_group,
-                created_by: chat.created_by,
-                participants: chatParticipants,
-                created_at: chat.created_at,
-                updated_at: chat.updated_at,
-              };
-              return existingChatData;
+          for (const chatParticipant of existingChats) {
+            const chatId = chatParticipant.chat_id;
+            
+            // Get all participants for this chat
+            const { data: allChatParticipants } = await supabase
+              .from('chat_participants')
+              .select('user_id')
+              .eq('chat_id', chatId);
+              
+            if (allChatParticipants && allChatParticipants.length === 2) {
+              const participantIds = allChatParticipants.map(p => p.user_id);
+              if (participantIds.includes(currentUserProfile.id) && 
+                  participantIds.includes(profileIds[0])) {
+                // Return existing chat
+                const chat = (chatParticipant as any).chats;
+                return {
+                  id: chat.id,
+                  name: chat.name,
+                  is_group: chat.is_group,
+                  created_by: chat.created_by,
+                  group_key_version: 1,
+                  created_at: chat.created_at,
+                  updated_at: chat.updated_at,
+                  participants: participantIds,
+                };
+              }
             }
           }
         }
@@ -288,22 +310,22 @@ export class ChatManager {
         .insert({
           name: isGroup ? name : null,
           is_group: isGroup,
-          created_by: currentUser.id,
+          created_by: currentUserProfile.id,
         })
         .select()
         .single();
 
       if (chatError || !newChatData) {
         console.error('Chat creation error:', chatError);
-        throw new Error('Failed to create chat in database');
+        throw new Error(`Failed to create chat: ${chatError?.message || 'Unknown database error'}`);
       }
 
       // Add participants to the chat
-      const allParticipants = [currentUser.id, ...profileIds];
+      const allParticipants = [currentUserProfile.id, ...profileIds];
       const participantInserts = allParticipants.map(userId => ({
         chat_id: newChatData.id,
         user_id: userId,
-        role: userId === currentUser.id ? 'admin' : 'member',
+        role: userId === currentUserProfile.id ? 'admin' : 'member',
       }));
 
       const { error: participantsInsertError } = await supabase
@@ -313,15 +335,20 @@ export class ChatManager {
       if (participantsInsertError) {
         console.error('Participants insert error:', participantsInsertError);
         // Try to clean up the chat if participant insertion failed
-        await supabase.from('chats').delete().eq('id', newChatData.id);
-        throw new Error('Failed to add participants to chat');
+        try {
+          await supabase.from('chats').delete().eq('id', newChatData.id);
+        } catch (cleanupError) {
+          console.error('Failed to cleanup chat after participant error:', cleanupError);
+        }
+        throw new Error(`Failed to add participants: ${participantsInsertError.message}`);
       }
 
       const newChat: Chat = {
         id: newChatData.id,
         name: isGroup ? name : undefined,
         is_group: isGroup,
-        created_by: currentUser.id,
+        created_by: currentUserProfile.id,
+        group_key_version: 1,
         participants: allParticipants,
         created_at: newChatData.created_at,
         updated_at: newChatData.updated_at,
@@ -335,7 +362,7 @@ export class ChatManager {
       await this.saveChatsToStorage();
 
       // Mark user as active
-      await markActive(currentUser.id);
+      await markActive(currentUserProfile.id);
 
       return newChat;
     } catch (error) {
