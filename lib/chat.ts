@@ -295,7 +295,7 @@ export class ChatManager {
 
       if (chatError || !newChatData) {
         console.error('Chat creation error:', chatError);
-        throw new Error('Failed to create chat in database');
+        throw new Error(`Failed to create chat in database: ${chatError?.message || 'Unknown'}`);
       }
 
       // Add participants to the chat
