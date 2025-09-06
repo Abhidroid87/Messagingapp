@@ -215,7 +215,7 @@ export class ChatManager {
             .single();
             
           if (profileError || !profile) {
-            throw new Error(User with ID ${participantId} not found);
+            throw new Error(`User with ID ${participantId} not found`);
           }
           profileIds.push(profile.id);
         } else {
@@ -227,7 +227,7 @@ export class ChatManager {
             .single();
             
           if (profileError || !profile) {
-            throw new Error(Profile with ID ${participantId} not found);
+            throw new Error(`Profile with ID ${participantId} not found`);
           }
           profileIds.push(profile.id);
         }
@@ -374,7 +374,7 @@ export class ChatManager {
       throw new Error('User not authenticated');
     }
 
-    const messageId = msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)};
+    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     try {
       // Get chat
@@ -460,7 +460,7 @@ export class ChatManager {
       this.pendingMessages.set(messageId, pendingMessage);
       await this.savePendingMessages();
 
-      throw new Error(Failed to send message: ${error instanceof Error ? error.message : 'Unknown error'});
+      throw new Error(`Failed to send message: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -581,7 +581,7 @@ export class ChatManager {
         await this.saveChatsToStorage();
       }
     } catch (error) {
-      throw new Error(Failed to add member: ${error instanceof Error ? error.message : 'Unknown error'});
+      throw new Error(`Failed to add member: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -603,7 +603,7 @@ export class ChatManager {
       this.chats.set(chatId, chat);
       await this.saveChatsToStorage();
     } catch (error) {
-      throw new Error(Failed to remove member: ${error instanceof Error ? error.message : 'Unknown error'});
+      throw new Error(`Failed to remove member: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
