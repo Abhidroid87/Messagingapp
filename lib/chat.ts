@@ -2,7 +2,7 @@ import { supabase } from './supabase';
 import { EncryptionManager } from './encryption';
 import { AuthManager, UserProfile } from './auth';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { markActive } from './activity'; // 👈 added import
+import { markActive } from './activity';
 
 export interface Chat {
   id: string;
@@ -63,11 +63,14 @@ export class ChatManager {
   private encryptionManager: EncryptionManager;
   private authManager: AuthManager;
   private pendingMessages: Map<string, PendingMessage> = new Map();
+  private chats: Map<string, Chat> = new Map();
+  private messages: Map<string, Message[]> = new Map();
   private retryTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.encryptionManager = EncryptionManager.getInstance();
     this.authManager = AuthManager.getInstance();
+    this.loadChatsFromStorage();
     this.startRetryMechanism();
   }
 
@@ -76,6 +79,47 @@ export class ChatManager {
       ChatManager.instance = new ChatManager();
     }
     return ChatManager.instance;
+  }
+
+  // Load chats from local storage
+  private async loadChatsFromStorage(): Promise<void> {
+    try {
+      const chatsData = await AsyncStorage.getItem('local_chats');
+      const messagesData = await AsyncStorage.getItem('local_messages');
+      
+      if (chatsData) {
+        const chatsArray: Chat[] = JSON.parse(chatsData);
+        chatsArray.forEach(chat => {
+          this.chats.set(chat.id, chat);
+        });
+      }
+      
+      if (messagesData) {
+        const messagesMap: Record<string, Message[]> = JSON.parse(messagesData);
+        Object.entries(messagesMap).forEach(([chatId, messages]) => {
+          this.messages.set(chatId, messages);
+        });
+      }
+    } catch (error) {
+      console.error('Failed to load chats from storage:', error);
+    }
+  }
+
+  // Save chats to local storage
+  private async saveChatsToStorage(): Promise<void> {
+    try {
+      const chatsArray = Array.from(this.chats.values());
+      const messagesMap: Record<string, Message[]> = {};
+      
+      this.messages.forEach((messages, chatId) => {
+        messagesMap[chatId] = messages;
+      });
+      
+      await AsyncStorage.setItem('local_chats', JSON.stringify(chatsArray));
+      await AsyncStorage.setItem('local_messages', JSON.stringify(messagesMap));
+    } catch (error) {
+      console.error('Failed to save chats to storage:', error);
+    }
   }
 
   // Start retry mechanism for failed messages
@@ -153,68 +197,168 @@ export class ChatManager {
     }
 
     try {
-      // Create chat
-      const { data: chat, error: chatError } = await supabase
+      // Validate participant IDs and convert user_ids to profile UUIDs if needed
+      if (!participantIds || participantIds.length === 0) {
+        throw new Error('At least one participant is required');
+      }
+
+      // Check if participantIds are user_ids (numbers) or profile UUIDs
+      const profileIds: string[] = [];
+      
+      for (const participantId of participantIds) {
+        // If it's a number, it's a user_id, so we need to get the profile UUID
+        if (!isNaN(Number(participantId))) {
+          const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('id, username, public_key')
+            .eq('user_id', parseInt(participantId))
+            .single();
+            
+          if (profileError || !profile) {
+            throw new Error(User with ID ${participantId} not found);
+          }
+          profileIds.push(profile.id);
+        } else {
+          // It's already a UUID, verify it exists
+          const { data: profile, error: profileError } = await supabase
+            .from('profiles')
+            .select('id, username, public_key')
+            .eq('id', participantId)
+            .single();
+            
+          if (profileError || !profile) {
+            throw new Error(Profile with ID ${participantId} not found);
+          }
+          profileIds.push(profile.id);
+        }
+      }
+
+      // Verify all participants exist
+      const { data: participants, error: participantsError } = await supabase
+        .from('profiles')
+        .select('id, username, public_key')
+        .in('id', profileIds);
+
+      if (participantsError || !participants) {
+        console.error('Error fetching participants:', participantsError);
+        throw new Error('Failed to verify participants');
+      }
+
+      if (participants.length !== profileIds.length) {
+        throw new Error('One or more participants not found');
+      }
+
+      // For direct messages, check if chat already exists
+      if (!isGroup && profileIds.length === 1) {
+        const { data: existingChat, error: existingChatError } = await supabase
+          .from('chats')
+          .select(`
+            *,
+            chat_participants!inner(user_id)
+          `)
+          .eq('is_group', false)
+          .not('chat_participants.user_id', 'is', null);
+          
+        if (existingChat && !existingChatError) {
+          // Check if this chat has exactly the two participants we want
+          for (const chat of existingChat) {
+            const chatParticipants = (chat as any).chat_participants.map((p: any) => p.user_id);
+            if (chatParticipants.length === 2 && 
+                chatParticipants.includes(currentUser.id) && 
+                chatParticipants.includes(profileIds[0])) {
+              // Convert to our Chat interface
+              const existingChatData: Chat = {
+                id: chat.id,
+                name: chat.name,
+                is_group: chat.is_group,
+                created_by: chat.created_by,
+                participants: chatParticipants,
+                created_at: chat.created_at,
+                updated_at: chat.updated_at,
+              };
+              return existingChatData;
+            }
+          }
+        }
+      }
+
+      // Create new chat in database
+      const { data: newChatData, error: chatError } = await supabase
         .from('chats')
         .insert({
-          name,
+          name: isGroup ? name : null,
           is_group: isGroup,
           created_by: currentUser.id,
         })
         .select()
         .single();
 
-      if (chatError) throw chatError;
-
-      // Add participants
-      const participants = [
-        { chat_id: chat.id, user_id: currentUser.id, role: 'admin' },
-        ...participantIds.map(id => ({ chat_id: chat.id, user_id: id, role: 'member' as const }))
-      ];
-
-      const { error: participantsError } = await supabase
-        .from('chat_participants')
-        .insert(participants);
-
-      if (participantsError) throw participantsError;
-
-      // Generate group key if it's a group chat
-      if (isGroup) {
-        await this.generateGroupKey(chat.id, participantIds);
+      if (chatError || !newChatData) {
+        console.error('Chat creation error:', chatError);
+        throw new Error('Failed to create chat in database');
       }
 
-      return chat;
+      // Add participants to the chat
+      const allParticipants = [currentUser.id, ...profileIds];
+      const participantInserts = allParticipants.map(userId => ({
+        chat_id: newChatData.id,
+        user_id: userId,
+        role: userId === currentUser.id ? 'admin' : 'member',
+      }));
+
+      const { error: participantsInsertError } = await supabase
+        .from('chat_participants')
+        .insert(participantInserts);
+
+      if (participantsInsertError) {
+        console.error('Participants insert error:', participantsInsertError);
+        // Try to clean up the chat if participant insertion failed
+        await supabase.from('chats').delete().eq('id', newChatData.id);
+        throw new Error('Failed to add participants to chat');
+      }
+
+      const newChat: Chat = {
+        id: newChatData.id,
+        name: isGroup ? name : undefined,
+        is_group: isGroup,
+        created_by: currentUser.id,
+        participants: allParticipants,
+        created_at: newChatData.created_at,
+        updated_at: newChatData.updated_at,
+      };
+
+      // Store chat locally
+      this.chats.set(newChat.id, newChat);
+      this.messages.set(newChat.id, []);
+      
+      // Save to storage
+      await this.saveChatsToStorage();
+
+      // Mark user as active
+      await markActive(currentUser.id);
+
+      return newChat;
     } catch (error) {
-      throw new Error(`Failed to create chat: ${error}`);
+      console.error('Chat creation error:', error);
+      if (error instanceof Error) {
+        throw error;
+      } else {
+        throw new Error('Failed to create chat: Unknown error');
+      }
     }
   }
 
-  // Generate group encryption key
-  private async generateGroupKey(chatId: string, participantIds: string[]): Promise<void> {
-    try {
-      // Get participant public keys
-      const { data: profiles } = await supabase
-        .from('profiles')
-        .select('id, public_key')
-        .in('id', participantIds);
-
-      if (!profiles) return;
-
-      const publicKeys = profiles.map(p => p.public_key);
-      const groupKey = this.encryptionManager.generateChatKey(chatId, publicKeys, 1);
-
-      // Encrypt group key for each participant
-      const groupKeyEntries = profiles.map(profile => ({
-        chat_id: chatId,
-        key_version: 1,
-        encrypted_key: this.encryptionManager.encryptMessage(groupKey, chatId, [profile.public_key]),
-        user_id: profile.id
-      }));
-
-      await supabase.from('group_keys').insert(groupKeyEntries);
-    } catch (error) {
-      console.error('Failed to generate group key:', error);
+  // Find existing direct chat between two users
+  private findExistingDirectChat(userId1: string, userId2: string): Chat | null {
+    for (const chat of this.chats.values()) {
+      if (!chat.is_group && 
+          chat.participants.length === 2 &&
+          chat.participants.includes(userId1) && 
+          chat.participants.includes(userId2)) {
+        return chat;
+      }
     }
+    return null;
   }
 
   // Send a message
@@ -230,21 +374,27 @@ export class ChatManager {
       throw new Error('User not authenticated');
     }
 
-    const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const messageId = msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)};
 
     try {
-      // Get chat participants for encryption
-      const { data: participants } = await supabase
-        .from('chat_participants')
-        .select('user_id, profiles(public_key)')
-        .eq('chat_id', chatId)
-        .neq('user_id', currentUser.id);
+      // Get chat
+      const chat = this.chats.get(chatId);
+      if (!chat) {
+        throw new Error('Chat not found');
+      }
 
-      if (!participants) throw new Error('Failed to get chat participants');
+      // Verify user is participant
+      if (!chat.participants.includes(currentUser.id)) {
+        throw new Error('User is not a participant in this chat');
+      }
 
-      const participantKeys = participants
-        .map(p => (p.profiles as any)?.public_key)
-        .filter(Boolean);
+      // Get participant public keys for encryption
+      const { data: participantProfiles } = await supabase
+        .from('profiles')
+        .select('id, public_key')
+        .in('id', chat.participants.filter(id => id !== currentUser.id));
+
+      const participantKeys = participantProfiles?.map(p => p.public_key) || [];
 
       // Encrypt message content
       const encryptedContent = this.encryptionManager.encryptMessage(
@@ -263,51 +413,37 @@ export class ChatManager {
         fileKey = fileEncryption.key;
       }
 
-      // Create message metadata (no content stored permanently)
-      const { data: message, error } = await supabase
-        .from('messages')
-        .insert({
-          id: messageId,
-          chat_id: chatId,
-          sender_id: currentUser.id,
-          message_type: messageType,
-          file_name: fileName,
-          file_size: fileData ? fileData.length : undefined,
-        })
-        .select()
-        .single();
+      // Create message
+      const message: Message = {
+        id: messageId,
+        chat_id: chatId,
+        sender_id: currentUser.id,
+        message_type: messageType,
+        file_name: fileName,
+        file_size: fileData ? fileData.length : undefined,
+        created_at: new Date().toISOString(),
+        expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days
+        content, // Store decrypted content locally for sender
+      };
 
-      if (error) throw error;
+      // Add message to local storage
+      const chatMessages = this.messages.get(chatId) || [];
+      chatMessages.push(message);
+      this.messages.set(chatId, chatMessages);
 
-      // Send encrypted content via realtime (not stored permanently)
-      await supabase.channel(`chat:${chatId}`).send({
-        type: 'broadcast',
-        event: 'new_message',
-        payload: {
-          message_id: messageId,
-          encrypted_content: encryptedContent,
-          encrypted_file: encryptedFileData,
-          file_key: fileKey,
-          sender_public_key: currentUser.public_key,
-        }
-      });
+      // Update chat's last message
+      chat.last_message = content.substring(0, 100);
+      chat.last_message_at = message.created_at;
+      chat.updated_at = message.created_at;
+      this.chats.set(chatId, chat);
 
-      // Create delivery status for all participants
-      const statusEntries = participants.map(p => ({
-        message_id: messageId,
-        user_id: p.user_id,
-        status: 'sent' as const
-      }));
+      // Save to storage
+      await this.saveChatsToStorage();
 
-      await supabase.from('message_status').insert(statusEntries);
-
-      // 👇 mark user active after sending
+      // Mark user active after sending
       await markActive(currentUser.id);
 
-      return {
-        ...message,
-        content, // Include decrypted content for sender
-      };
+      return message;
     } catch (error) {
       // Add to pending messages for retry
       const pendingMessage: PendingMessage = {
@@ -324,41 +460,23 @@ export class ChatManager {
       this.pendingMessages.set(messageId, pendingMessage);
       await this.savePendingMessages();
 
-      throw new Error(`Failed to send message: ${error}`);
+      throw new Error(Failed to send message: ${error instanceof Error ? error.message : 'Unknown error'});
     }
   }
 
   // Update message status (delivered/seen)
   async updateMessageStatus(messageId: string, status: 'delivered' | 'seen'): Promise<void> {
-    const currentUser = this.authManager.getCurrentUser();
-    if (!currentUser) return;
-
-    try {
-      await supabase
-        .from('message_status')
-        .update({ status, updated_at: new Date().toISOString() })
-        .eq('message_id', messageId)
-        .eq('user_id', currentUser.id);
-    } catch (error) {
-      console.error('Failed to update message status:', error);
-    }
+    // In local storage mode, we don't track message status
+    // This could be implemented with local storage if needed
   }
 
-  // Get chat messages (metadata only)
+  // Get chat messages
   async getChatMessages(chatId: string, limit: number = 50): Promise<Message[]> {
     try {
-      const { data: messages, error } = await supabase
-        .from('messages')
-        .select(`
-          *,
-          message_status(*)
-        `)
-        .eq('chat_id', chatId)
-        .order('created_at', { ascending: false })
-        .limit(limit);
-
-      if (error) throw error;
-      return messages || [];
+      const messages = this.messages.get(chatId) || [];
+      return messages
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, limit);
     } catch (error) {
       console.error('Failed to get messages:', error);
       return [];
@@ -371,37 +489,66 @@ export class ChatManager {
     if (!currentUser) return [];
 
     try {
-      // 1. Get the chat IDs where the user participates
-const { data: chatIds, error: chatIdsError } = await supabase
-  .from('chat_participants')
-  .select('chat_id')
-  .eq('user_id', currentUser.id);
+      // Get chats from database where user is a participant
+      const { data: chatData, error: chatsError } = await supabase
+        .from('chats')
+        .select(`
+          *,
+          chat_participants!inner(user_id, role)
+        `)
+        .eq('chat_participants.user_id', currentUser.id)
+        .order('updated_at', { ascending: false });
 
-if (chatIdsError) throw chatIdsError;
+      if (chatsError) {
+        console.error('Error fetching chats:', chatsError);
+        // Fallback to local storage
+        const userChats = Array.from(this.chats.values())
+          .filter(chat => chat.participants.includes(currentUser.id))
+          .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+        return userChats;
+      }
 
-const ids = (chatIds || []).map(c => c.chat_id);
+      if (!chatData) return [];
 
-if (ids.length === 0) return [];
+      // Convert to Chat interface and get all participants for each chat
+      const userChats: Chat[] = [];
+      
+      for (const chat of chatData) {
+        // Get all participants for this chat
+        const { data: allParticipants } = await supabase
+          .from('chat_participants')
+          .select('user_id')
+          .eq('chat_id', chat.id);
 
-// 2. Fetch chats for those IDs
-const { data: chats, error: chatsError } = await supabase
-  .from('chats')
-  .select(`
-    *,
-    chat_participants(
-      *,
-      profiles(*)
-    )
-  `)
-  .in('id', ids);
+        const participantIds = allParticipants?.map(p => p.user_id) || [];
 
-if (chatsError) throw chatsError;
+        const chatObj: Chat = {
+          id: chat.id,
+          name: chat.name,
+          is_group: chat.is_group,
+          created_by: chat.created_by,
+          participants: participantIds,
+          created_at: chat.created_at,
+          updated_at: chat.updated_at,
+        };
 
-return chats || [];
+        userChats.push(chatObj);
+        
+        // Also store locally for offline access
+        this.chats.set(chat.id, chatObj);
+      }
 
+      // Save to local storage
+      await this.saveChatsToStorage();
+
+      return userChats;
     } catch (error) {
       console.error('Failed to get chats:', error);
-      return [];
+      // Fallback to local storage
+      const userChats = Array.from(this.chats.values())
+        .filter(chat => chat.participants.includes(currentUser.id))
+        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      return userChats;
     }
   }
 
@@ -411,31 +558,30 @@ return chats || [];
     if (!currentUser) throw new Error('User not authenticated');
 
     try {
-      // Check if user is admin
-      const { data: participant } = await supabase
-        .from('chat_participants')
-        .select('role')
-        .eq('chat_id', chatId)
-        .eq('user_id', currentUser.id)
+      const chat = this.chats.get(chatId);
+      if (!chat) throw new Error('Chat not found');
+
+      if (!chat.is_group) throw new Error('Cannot add members to direct chat');
+      if (chat.created_by !== currentUser.id) throw new Error('Only chat creator can add members');
+
+      // Verify user exists
+      const { data: userProfile } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('id', userId)
         .single();
 
-      if (!participant || participant.role !== 'admin') {
-        throw new Error('Only admins can add members');
+      if (!userProfile) throw new Error('User not found');
+
+      // Add to participants if not already present
+      if (!chat.participants.includes(userId)) {
+        chat.participants.push(userId);
+        chat.updated_at = new Date().toISOString();
+        this.chats.set(chatId, chat);
+        await this.saveChatsToStorage();
       }
-
-      // Add new member
-      await supabase
-        .from('chat_participants')
-        .insert({
-          chat_id: chatId,
-          user_id: userId,
-          role: 'member'
-        });
-
-      // Rotate group key
-      await this.rotateGroupKey(chatId);
     } catch (error) {
-      throw new Error(`Failed to add member: ${error}`);
+      throw new Error(Failed to add member: ${error instanceof Error ? error.message : 'Unknown error'});
     }
   }
 
@@ -445,135 +591,33 @@ return chats || [];
     if (!currentUser) throw new Error('User not authenticated');
 
     try {
-      // Check if user is admin
-      const { data: participant } = await supabase
-        .from('chat_participants')
-        .select('role')
-        .eq('chat_id', chatId)
-        .eq('user_id', currentUser.id)
-        .single();
+      const chat = this.chats.get(chatId);
+      if (!chat) throw new Error('Chat not found');
 
-      if (!participant || participant.role !== 'admin') {
-        throw new Error('Only admins can remove members');
-      }
+      if (!chat.is_group) throw new Error('Cannot remove members from direct chat');
+      if (chat.created_by !== currentUser.id) throw new Error('Only chat creator can remove members');
 
-      // Remove member
-      await supabase
-        .from('chat_participants')
-        .update({ left_at: new Date().toISOString() })
-        .eq('chat_id', chatId)
-        .eq('user_id', userId);
-
-      // Rotate group key
-      await this.rotateGroupKey(chatId);
+      // Remove from participants
+      chat.participants = chat.participants.filter(id => id !== userId);
+      chat.updated_at = new Date().toISOString();
+      this.chats.set(chatId, chat);
+      await this.saveChatsToStorage();
     } catch (error) {
-      throw new Error(`Failed to remove member: ${error}`);
+      throw new Error(Failed to remove member: ${error instanceof Error ? error.message : 'Unknown error'});
     }
   }
 
-  // Rotate group key when membership changes
-  private async rotateGroupKey(chatId: string): Promise<void> {
-    try {
-      // Increment key version
-      await supabase.rpc('rotate_group_key', { chat_uuid: chatId });
-
-      // Get current active participants
-      const { data: participants } = await supabase
-        .from('chat_participants')
-        .select('user_id, profiles(public_key)')
-        .eq('chat_id', chatId)
-        .is('left_at', null);
-
-      if (!participants) return;
-
-      const publicKeys = participants
-        .map(p => (p.profiles as any)?.public_key)
-        .filter(Boolean);
-
-      // Generate new group key
-      const newGroupKey = this.encryptionManager.rotateChatKey(chatId, publicKeys);
-
-      // Get new key version
-      const { data: chat } = await supabase
-        .from('chats')
-        .select('group_key_version')
-        .eq('id', chatId)
-        .single();
-
-      if (!chat) return;
-
-      // Encrypt new key for each active participant
-      const groupKeyEntries = participants.map(p => ({
-        chat_id: chatId,
-        key_version: chat.group_key_version,
-        encrypted_key: this.encryptionManager.encryptMessage(
-          newGroupKey,
-          chatId,
-          [(p.profiles as any)?.public_key]
-        ),
-        user_id: p.user_id
-      }));
-
-      await supabase.from('group_keys').insert(groupKeyEntries);
-    } catch (error) {
-      console.error('Failed to rotate group key:', error);
-    }
-  }
-
-  // Subscribe to chat updates
+  // Subscribe to chat updates (mock implementation for local storage)
   subscribeToChat(chatId: string, onMessage: (message: any) => void): () => void {
-    const channel = supabase.channel(`chat:${chatId}`)
-      .on('broadcast', { event: 'new_message' }, (payload) => {
-        try {
-          // Decrypt message content
-          const decryptedContent = this.encryptionManager.decryptMessage(
-            payload.payload.encrypted_content,
-            chatId,
-            payload.payload.sender_public_key
-          );
-
-          // Decrypt file if present
-          let decryptedFile: string | undefined;
-          if (payload.payload.encrypted_file && payload.payload.file_key) {
-            decryptedFile = this.encryptionManager.decryptFile(
-              payload.payload.encrypted_file,
-              payload.payload.file_key
-            );
-          }
-
-          onMessage({
-            id: payload.payload.message_id,
-            content: decryptedContent,
-            file_data: decryptedFile,
-            sender_public_key: payload.payload.sender_public_key,
-          });
-
-          // Update message status to delivered
-          this.updateMessageStatus(payload.payload.message_id, 'delivered');
-
-          // 👇 mark user active after receiving a message
-          const currentUser = this.authManager.getCurrentUser();
-          if (currentUser) {
-            markActive(currentUser.id);
-          }
-        } catch (error) {
-          console.error('Failed to decrypt message:', error);
-        }
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    // In a real implementation, this would use WebSockets or Server-Sent Events
+    // For now, return a no-op unsubscribe function
+    return () => {};
   }
 
   // Cleanup expired messages
   static async cleanupExpiredMessages(): Promise<void> {
-    try {
-      await supabase.rpc('cleanup_expired_messages');
-    } catch (error) {
-      console.error('Failed to cleanup expired messages:', error);
-    }
+    // This would clean up messages older than their expiry date
+    // Implementation depends on storage strategy
   }
 
   // Clear all pending messages
@@ -585,6 +629,14 @@ return chats || [];
   // Get pending messages count
   getPendingMessagesCount(): number {
     return this.pendingMessages.size;
+  }
+
+  // Clear all chats (for logout)
+  async clearAllChats(): Promise<void> {
+    this.chats.clear();
+    this.messages.clear();
+    this.pendingMessages.clear();
+    await AsyncStorage.multiRemove(['local_chats', 'local_messages', 'pending_messages']);
   }
 
   // Destroy chat manager
