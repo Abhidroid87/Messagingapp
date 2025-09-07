@@ -202,6 +202,9 @@ export class AuthManager {
   // Login with stored session
   async loginWithSession(): Promise<UserProfile | null> {
     try {
+      // First check if we have a valid Supabase auth session
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      
       const sessionData = await AsyncStorage.getItem('user_session');
       const privateKey = await AsyncStorage.getItem('private_key');
 
@@ -219,6 +222,20 @@ export class AuthManager {
 
       const profile = session.profile;
       
+      // Verify that the stored profile matches the current auth user
+      if (user && profile.id !== user.id) {
+        console.warn('Profile ID mismatch with auth user, logging out');
+        await this.logout();
+        return null;
+      }
+      
+      // If no auth user but we have a stored session, it's invalid
+      if (!user) {
+        console.warn('No authenticated user found, clearing session');
+        await this.logout();
+        return null;
+      }
+      
       // Restore encryption keys
       this.encryptionManager.setKeyPair({
         publicKey: profile.public_key,
@@ -233,6 +250,8 @@ export class AuthManager {
       return profile;
     } catch (error) {
       console.error('Session login error:', error);
+      // Clear invalid session on error
+      await this.logout();
       return null;
     }
   }

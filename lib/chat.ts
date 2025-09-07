@@ -196,6 +196,13 @@ export class ChatManager {
       throw new Error('User not authenticated');
     }
 
+    // Get the current authenticated user from Supabase
+    const { data: { user }, error: authError } = await supabase.auth.getUser();
+    if (authError || !user) {
+      console.error('Auth error:', authError?.message || 'No authenticated user');
+      throw new Error('User not authenticated with Supabase');
+    }
+
     try {
       // Validate participant IDs and convert user_ids to profile UUIDs if needed
       if (!participantIds || participantIds.length === 0) {
@@ -215,6 +222,7 @@ export class ChatManager {
             .single();
             
           if (profileError || !profile) {
+            console.error('Profile lookup error:', profileError?.message || 'Profile not found');
             throw new Error(`User with ID ${participantId} not found`);
           }
           profileIds.push(profile.id);
@@ -227,6 +235,7 @@ export class ChatManager {
             .single();
             
           if (profileError || !profile) {
+            console.error('Profile verification error:', profileError?.message || 'Profile not found');
             throw new Error(`Profile with ID ${participantId} not found`);
           }
           profileIds.push(profile.id);
@@ -240,7 +249,7 @@ export class ChatManager {
         .in('id', profileIds);
 
       if (participantsError || !participants) {
-        console.error('Error fetching participants:', participantsError);
+        console.error('Error fetching participants:', participantsError?.message || 'Unknown error');
         throw new Error('Failed to verify participants');
       }
 
@@ -264,7 +273,7 @@ export class ChatManager {
           for (const chat of existingChat) {
             const chatParticipants = (chat as any).chat_participants.map((p: any) => p.user_id);
             if (chatParticipants.length === 2 && 
-                chatParticipants.includes(currentUser.id) && 
+                chatParticipants.includes(user.id) && 
                 chatParticipants.includes(profileIds[0])) {
               // Convert to our Chat interface
               const existingChatData: Chat = {
@@ -282,46 +291,65 @@ export class ChatManager {
         }
       }
 
-      // Create new chat in database
+      // Create new chat in database using the authenticated user's ID
       const { data: newChatData, error: chatError } = await supabase
         .from('chats')
         .insert({
           name: isGroup ? name : null,
           is_group: isGroup,
-          created_by: currentUser.id,
+          created_by: user.id, // Use Supabase auth user ID for RLS
         })
         .select()
         .single();
 
       if (chatError || !newChatData) {
-        console.error('Chat creation error:', chatError);
-        throw new Error(`Failed to create chat in database: ${chatError?.message || 'Unknown'}`);
+        console.error('Chat creation error:', chatError?.message || 'Unknown error', chatError);
+        throw new Error(`Failed to create chat in database: ${chatError?.message || 'Unknown error'}`);
       }
 
-      // Add participants to the chat
-      const allParticipants = [currentUser.id, ...profileIds];
-      const participantInserts = allParticipants.map(userId => ({
-        chat_id: newChatData.id,
-        user_id: userId,
-        role: userId === currentUser.id ? 'admin' : 'member',
-      }));
-
-      const { error: participantsInsertError } = await supabase
+      // First, add the creator as admin
+      const { error: creatorInsertError } = await supabase
         .from('chat_participants')
-        .insert(participantInserts);
+        .insert({
+          chat_id: newChatData.id,
+          user_id: user.id,
+          role: 'admin',
+        });
 
-      if (participantsInsertError) {
-        console.error('Participants insert error:', participantsInsertError);
-        // Try to clean up the chat if participant insertion failed
+      if (creatorInsertError) {
+        console.error('Creator participant insert error:', creatorInsertError?.message || 'Unknown error', creatorInsertError);
+        // Clean up the chat if creator insertion failed
         await supabase.from('chats').delete().eq('id', newChatData.id);
-        throw new Error('Failed to add participants to chat');
+        throw new Error(`Failed to add creator to chat: ${creatorInsertError?.message || 'Unknown error'}`);
       }
 
+      // Then add other participants as members
+      if (profileIds.length > 0) {
+        const participantInserts = profileIds.map(userId => ({
+          chat_id: newChatData.id,
+          user_id: userId,
+          role: 'member',
+        }));
+
+        const { error: participantsInsertError } = await supabase
+          .from('chat_participants')
+          .insert(participantInserts);
+
+        if (participantsInsertError) {
+          console.error('Participants insert error:', participantsInsertError?.message || 'Unknown error', participantsInsertError);
+          // Clean up the chat if participant insertion failed
+          await supabase.from('chats').delete().eq('id', newChatData.id);
+          throw new Error(`Failed to add participants to chat: ${participantsInsertError?.message || 'Unknown error'}`);
+        }
+      }
+
+      // Build the complete participants list for local storage
+      const allParticipants = [user.id, ...profileIds];
       const newChat: Chat = {
         id: newChatData.id,
         name: isGroup ? name : undefined,
         is_group: isGroup,
-        created_by: currentUser.id,
+        created_by: user.id,
         participants: allParticipants,
         created_at: newChatData.created_at,
         updated_at: newChatData.updated_at,
@@ -335,11 +363,11 @@ export class ChatManager {
       await this.saveChatsToStorage();
 
       // Mark user as active
-      await markActive(currentUser.id);
+      await markActive(user.id);
 
       return newChat;
     } catch (error) {
-      console.error('Chat creation error:', error);
+      console.error('Chat creation error:', error instanceof Error ? error.message : 'Unknown error', error);
       if (error instanceof Error) {
         throw error;
       } else {
