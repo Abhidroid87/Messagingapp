@@ -196,12 +196,14 @@ export class ChatManager {
       throw new Error('User not authenticated');
     }
 
-    // Get the current authenticated user from Supabase
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      console.error('Auth error:', authError?.message || 'No authenticated user');
-      throw new Error('User not authenticated with Supabase');
+    // Check for active Supabase session
+    const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+    if (sessionError || !session || !session.user) {
+      console.error('Session error:', sessionError?.message || 'No active session');
+      throw new Error('No active session. Please log in again.');
     }
+
+    const user = session.user;
 
     try {
       // Validate participant IDs and convert user_ids to profile UUIDs if needed
@@ -402,6 +404,12 @@ export class ChatManager {
       throw new Error('User not authenticated');
     }
 
+    // Check for active session
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw new Error('No active session. Please log in again.');
+    }
+
     const messageId = `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     try {
@@ -516,6 +524,17 @@ export class ChatManager {
     const currentUser = this.authManager.getCurrentUser();
     if (!currentUser) return [];
 
+    // Check for active session
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      console.warn('No active session for getUserChats, using local storage only');
+      // Fallback to local storage
+      const userChats = Array.from(this.chats.values())
+        .filter(chat => chat.participants.includes(currentUser.id))
+        .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      return userChats;
+    }
+
     try {
       // Get chats from database where user is a participant
       const { data: chatData, error: chatsError } = await supabase
@@ -585,6 +604,12 @@ export class ChatManager {
     const currentUser = this.authManager.getCurrentUser();
     if (!currentUser) throw new Error('User not authenticated');
 
+    // Check for active session
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw new Error('No active session. Please log in again.');
+    }
+
     try {
       const chat = this.chats.get(chatId);
       if (!chat) throw new Error('Chat not found');
@@ -617,6 +642,12 @@ export class ChatManager {
   async removeGroupMember(chatId: string, userId: string): Promise<void> {
     const currentUser = this.authManager.getCurrentUser();
     if (!currentUser) throw new Error('User not authenticated');
+
+    // Check for active session
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      throw new Error('No active session. Please log in again.');
+    }
 
     try {
       const chat = this.chats.get(chatId);

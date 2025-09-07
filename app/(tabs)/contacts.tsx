@@ -26,6 +26,25 @@ export default function ContactsScreen() {
   const authManager = AuthManager.getInstance();
   const chatManager = ChatManager.getInstance();
 
+  if (!user) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Find Contacts</Text>
+        </View>
+        <View style={styles.emptyContainer}>
+          <Text style={styles.emptyText}>Please log in to find contacts</Text>
+          <TouchableOpacity
+            style={styles.loginButton}
+            onPress={() => expoRouter.push('/(auth)/welcome')}
+          >
+            <Text style={styles.loginButtonText}>Go to Login</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   const handleSearch = async () => {
     if (!searchQuery.trim()) {
       setSearchResults([]);
@@ -39,7 +58,13 @@ export default function ContactsScreen() {
       const filteredResults = results.filter(result => result.id !== user?.id);
       setSearchResults(filteredResults);
     } catch (error) {
-      Alert.alert('Search Failed', 'Unable to search for users');
+      console.error('Search error:', error);
+      if (error instanceof Error && error.message.includes('session')) {
+        Alert.alert('Session Expired', 'Please log in again to search for users');
+        expoRouter.push('/(auth)/welcome');
+      } else {
+        Alert.alert('Search Failed', 'Unable to search for users');
+      }
     } finally {
       setLoading(false);
     }
@@ -71,7 +96,13 @@ export default function ContactsScreen() {
               Alert.alert('Success', `Chat created with ${contact.username}!`);
               // Navigate to chat screen when implemented
             } catch (error) {
-              Alert.alert('Error', 'Failed to create chat. Please try again.');
+              console.error('Chat creation error:', error);
+              if (error instanceof Error && error.message.includes('session')) {
+                Alert.alert('Session Expired', 'Please log in again to create chats');
+                expoRouter.push('/(auth)/welcome');
+              } else {
+                Alert.alert('Error', 'Failed to create chat. Please try again.');
+              }
             }
           }
         },
@@ -482,5 +513,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#94a3b8',
     textAlign: 'center',
+  },
+  loginButton: {
+    backgroundColor: '#2563eb',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    marginTop: 16,
+  },
+  loginButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });

@@ -21,14 +21,22 @@ export default function HomeScreen() {
   if (!user) {
     return (
       <View style={styles.loadingContainer}>
-        <Text>Please log in to continue</Text>
+        <Text style={styles.loadingText}>Please log in to continue</Text>
+        <TouchableOpacity
+          style={styles.loginButton}
+          onPress={() => router.push('/(auth)/welcome')}
+        >
+          <Text style={styles.loginButtonText}>Go to Login</Text>
+        </TouchableOpacity>
       </View>
     );
   }
 
   React.useEffect(() => {
-    loadChats();
-  }, []);
+    if (user) {
+      loadChats();
+    }
+  }, [user]);
 
   const loadChats = async () => {
     try {
@@ -36,6 +44,10 @@ export default function HomeScreen() {
       setChats(userChats);
     } catch (error) {
       console.error('Failed to load chats:', error);
+      if (error instanceof Error && error.message.includes('session')) {
+        // Session expired, redirect to login
+        router.push('/(auth)/welcome');
+      }
     } finally {
       setLoading(false);
     }
@@ -262,6 +274,18 @@ const styles = StyleSheet.create({
     borderRadius: 8,
   },
   startChatButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  loginButton: {
+    backgroundColor: '#2563eb',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    borderRadius: 8,
+    marginTop: 16,
+  },
+  loginButtonText: {
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',

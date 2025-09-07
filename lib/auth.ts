@@ -202,13 +202,28 @@ export class AuthManager {
   // Login with stored session
   async loginWithSession(): Promise<UserProfile | null> {
     try {
-      // First check if we have a valid Supabase auth session
-      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      // Check for active Supabase session
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError) {
+        console.error('Session error:', sessionError);
+        await this.logout();
+        return null;
+      }
+
+      if (!session || !session.user) {
+        console.log('No active session found');
+        await this.logout();
+        return null;
+      }
+
+      const user = session.user;
       
       const sessionData = await AsyncStorage.getItem('user_session');
       const privateKey = await AsyncStorage.getItem('private_key');
 
       if (!sessionData || !privateKey) {
+        console.log('No local session data found');
         return null;
       }
 
@@ -216,6 +231,7 @@ export class AuthManager {
       
       // Check if session is expired
       if (Date.now() > session.expiresAt) {
+        console.log('Local session expired');
         await this.logout();
         return null;
       }
@@ -229,13 +245,6 @@ export class AuthManager {
         return null;
       }
       
-      // If no auth user but we have a stored session, it's invalid
-      if (!user) {
-        console.warn('No authenticated user found, clearing session');
-        await this.logout();
-        return null;
-      }
-      
       // Restore encryption keys
       this.encryptionManager.setKeyPair({
         publicKey: profile.public_key,
@@ -243,7 +252,7 @@ export class AuthManager {
       });
 
       // Update last activity
-      await this.updateLastActivity(profile.id);
+      await this.updateLastActivity(profile.id).catch(err => console.warn('Failed to update activity:', err));
 
       this.currentUser = profile;
       this.startSessionRefresh();
@@ -259,6 +268,13 @@ export class AuthManager {
   // Update last activity timestamp
   async updateLastActivity(profileId: string): Promise<void> {
     try {
+      // Check if we have an active session
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        console.warn('No active session for updateLastActivity');
+        return;
+      }
+
       await supabase.rpc('update_last_activity', { profile_id: profileId });
     } catch (error) {
       console.warn('Failed to update last activity:', error);
@@ -272,6 +288,14 @@ export class AuthManager {
     }
 
     try {
+      // Check if we have an active session
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        console.warn('No active session for deleteProfile');
+        await this.logout();
+        return;
+      }
+
       // Delete from database
       const { error } = await supabase
         .from('profiles')
@@ -293,6 +317,13 @@ export class AuthManager {
   // Search users by username or ID
   async searchUser(query: string): Promise<UserProfile[]> {
     try {
+      // Check if we have an active session
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        console.warn('No active session for search');
+        return [];
+      }
+
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
@@ -310,6 +341,13 @@ export class AuthManager {
   // Get user by ID
   async getUserById(userId: number): Promise<UserProfile | null> {
     try {
+      // Check if we have an active session
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        console.warn('No active session for getUserById');
+        return null;
+      }
+
       const { data, error } = await supabase
         .from('profiles')
         .select('*')
