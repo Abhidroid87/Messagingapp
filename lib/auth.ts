@@ -227,16 +227,16 @@ export class AuthManager {
         return null;
       }
 
-      const session = JSON.parse(sessionData);
+      const localSessionData = JSON.parse(sessionData);
       
       // Check if session is expired
-      if (Date.now() > session.expiresAt) {
+      if (Date.now() > localSessionData.expiresAt) {
         console.log('Local session expired');
         await this.logout();
         return null;
       }
 
-      const profile = session.profile;
+      const profile = localSessionData.profile;
       
       // Verify that the stored profile matches the current auth user
       if (user && profile.id !== user.id) {
