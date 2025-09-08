@@ -293,10 +293,11 @@ export class ChatManager {
         .select()
         .single();
 
-      if (chatError || !newChatData) {
-        console.error('Chat creation error:', chatError);
-        throw new Error('Failed to create chat in database');
+        if (chatError || !newChatData) {
+        console.error('Chat creation error details:', chatError);
+        throw new Error(`Failed to create chat in database: ${chatError?.message || 'Unknown'}`);
       }
+
 
       // Add participants to the chat
       const allParticipants = [currentUser.id, ...profileIds];
