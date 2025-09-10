@@ -165,66 +165,17 @@ export class AuthManager {
    * If a profile does not exist for the auth user, returns null (call register to create).
    */
   async loginWithSession(): Promise<UserProfile | null> {
-    try {
-      // Check for active Supabase session
-      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
-      
-      if (sessionError) {
-        console.error('Session error:', sessionError);
-        await this.logout();
-        return null;
-      }
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user?.id) return null;
 
-      if (!session || !session.user) {
-        console.log('No active session found');
-        await this.logout();
-        return null;
-      }
-
-      const user = session.user;
-      
-      const sessionData = await AsyncStorage.getItem('user_session');
-      const privateKey = await AsyncStorage.getItem('private_key');
-
-      if (!sessionData || !privateKey) {
-        console.log('No local session data found');
-        return null;
-      }
-
-      const localSessionData = JSON.parse(sessionData);
-      
-      // Check if session is expired
-      if (Date.now() > localSessionData.expiresAt) {
-        console.log('Local session expired');
-        await this.logout();
-        return null;
-      }
-
-      const profile = localSessionData.profile;
-      
-      // Verify that the stored profile matches the current auth user
-      if (user && profile.id !== user.id) {
-        console.warn('Profile ID mismatch with auth user, logging out');
-        await this.logout();
-        return null;
-      }
-      
-      // Restore encryption keys
-      this.encryptionManager.setKeyPair({
-        publicKey: profile.public_key,
-        privateKey,
-      });
-
-      // Update last activity
-      await this.updateLastActivity(profile.id).catch(err => console.warn('Failed to update activity:', err));
-
-      this.currentUser = profile;
-      this.startSessionRefresh();
-      return profile;
-    } catch (error) {
-      console.error('Session login error:', error);
-      // Clear invalid session on error
-      await this.logout();
+    // Fetch profile by auth uid
+    const { data: profile, error } = await supabase.from('profiles').select('*').eq('id', session.user.id).maybeSingle();
+    if (error) {
+      console.warn('loginWithSession: profile fetch error', error);
+      return null;
+    }
+    if (!profile) {
+      // Auth exists but profile missing – user must go through register(username)
       return null;
     }
 
@@ -245,101 +196,12 @@ export class AuthManager {
 
   async updateLastActivity(profileId: string): Promise<void> {
     try {
-      // Check if we have an active session
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        console.warn('No active session for updateLastActivity');
-        return;
-      }
-
       await supabase.rpc('update_last_activity', { profile_id: profileId });
-    } catch (error) {
-      console.warn('Failed to update last activity:', error);
+    } catch (e) {
+      console.warn('updateLastActivity failed (non-fatal):', e);
     }
   }
 
-  // Delete user profile permanently
-  async deleteProfile(): Promise<void> {
-    if (!this.currentUser) {
-      throw new Error('No user logged in');
-    }
-
-    try {
-      // Check if we have an active session
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        console.warn('No active session for deleteProfile');
-        await this.logout();
-        return;
-      }
-
-      // Delete from database
-      const { error } = await supabase
-        .from('profiles')
-        .delete()
-        .eq('id', this.currentUser.id);
-
-      if (error) {
-        console.warn('Failed to delete profile from database:', error);
-      }
-
-      // Clear local storage
-      await this.logout();
-    } catch (error) {
-      console.warn('Profile deletion error:', error);
-      await this.logout();
-    }
-  }
-
-  // Search users by username or ID
-  async searchUser(query: string): Promise<UserProfile[]> {
-    try {
-      // Check if we have an active session
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        console.warn('No active session for search');
-        return [];
-      }
-
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .or(`username.ilike.%${query}%,user_id.eq.${parseInt(query) || 0}`)
-        .limit(10);
-
-      if (error) throw error;
-      return data || [];
-    } catch (error) {
-      console.warn('Database search not available:', error);
-      return [];
-    }
-  }
-
-  // Get user by ID
-  async getUserById(userId: number): Promise<UserProfile | null> {
-    try {
-      // Check if we have an active session
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) {
-        console.warn('No active session for getUserById');
-        return null;
-      }
-
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('user_id', userId)
-        .single();
-
-      if (error) return null;
-      return data;
-    } catch (error) {
-      console.warn('Database getUserById not available:', error);
-      return null;
-    }
-  }
-
-  // Get current user
   getCurrentUser(): UserProfile | null {
     return this.currentUser;
   }
