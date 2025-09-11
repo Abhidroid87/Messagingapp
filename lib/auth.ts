@@ -49,7 +49,6 @@ export class AuthManager {
   private validateUsername(username: string): void {
     if (!username || username.length < 3) throw new Error('Username must be at least 3 characters');
     if (username.length > 20) throw new Error('Username must be less than 20 characters');
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) throw new Error('Username can only contain letters, numbers, underscores');
   }
 
   private async generateUniqueUserId(): Promise<number> {
@@ -89,7 +88,10 @@ export class AuthManager {
     if (existing) return existing as UserProfile;
 
     // Need username for new profile
-    if (!username) throw new Error('Username required to create profile');
+    // username optional when restoring profile
+    if (!username) {
+      return existing as UserProfile;
+    }
 
     const keyPair = this.encryptionManager.generateKeyPair();
     if (!keyPair?.publicKey || !keyPair?.privateKey) throw new Error('Failed to generate key pair');
