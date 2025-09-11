@@ -427,7 +427,10 @@ export class ChatManager {
       }
 
       // Mark user active after sending
-      await markActive(currentUser.id);s.saveChatsToStorage();
+      await this.saveChatsToStorage();
+
+      // Mark user active after sending
+      await markActive(currentUser.id);
 
       // Mark user as active
       await markActive(currentUser.id);
@@ -608,7 +611,10 @@ export class ChatManager {
       }
 
       // Mark user active after sending
-      await markActive(currentUser.id);s.saveChatsToStorage();
+      await this.saveChatsToStorage();
+
+      // Mark user active after sending
+      await markActive(currentUser.id);
 
       // Mark user active after sending
       await markActive(currentUser.id);

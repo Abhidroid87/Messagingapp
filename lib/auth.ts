@@ -4,22 +4,23 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { markActive } from './activity';
 
 /**
- * IMPORTANT ALIGNMENT NOTES
- * - We now rely on REAL Supabase Auth (anonymous sign-in) so RLS policies that use auth.uid() will pass.
- * - profiles.id == auth.users.id (uuid). We still keep profiles.user_id (bigint) for QR/lookup.
- * - Session persistence is handled by supabase-js using AsyncStorage (make sure your Supabase client is configured accordingly).
+ * Simplified anonymous-only AuthManager.
+ * - Always uses supabase.auth.signInAnonymously()
+ * - App is responsible for creating the profiles row (no DB trigger reliance)
+ * - Generates username, short user_id, and stores keypair locally
  */
 
 export interface UserProfile {
   id: string;            // uuid == auth.users.id
-  user_id: number;       // bigint (8-digit app id for QR)
-  username: string;
+  user_id?: number;      // bigint (8-digit app id for QR) - optional at first
+  username?: string;
   gender?: string;
   bio?: string;
-  public_key: string;
-  created_at: string;
-  updated_at: string;
-  last_activity: string;
+  public_key?: string;
+  created_at?: string;
+  updated_at?: string;
+  last_activity?: string;
+  token?: string; // invite token / shareable uuid
 }
 
 export class AuthManager {
@@ -28,7 +29,7 @@ export class AuthManager {
   private encryptionManager: EncryptionManager;
   private refreshTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
+  private constructor() {
     this.encryptionManager = EncryptionManager.getInstance();
   }
 
@@ -46,68 +47,65 @@ export class AuthManager {
     return Math.floor(10000000 + Math.random() * 90000000);
   }
 
-  private validateUsername(username: string): void {
-    if (!username || username.length < 3) throw new Error('Username must be at least 3 characters');
-    if (username.length > 20) throw new Error('Username must be less than 20 characters');
-  }
-
   private async generateUniqueUserId(): Promise<number> {
     let attempts = 0;
     while (attempts < 10) {
       const id = this.generateUserId();
-      const { data } = await supabase.from('profiles').select('user_id').eq('user_id', id).maybeSingle();
-      if (!data) return id;
+      try {
+        const { data } = await supabase.from('profiles').select('user_id').eq('user_id', id).maybeSingle();
+        if (!data) return id;
+      } catch (e) {
+        // ignore and retry
+      }
       attempts++;
     }
     throw new Error('Unable to generate unique user ID. Please try again.');
   }
 
+  private generateRandomUsername(): string {
+    const adjectives = ['cool','fast','silent','bright','dark','happy','red','blue','green'];
+    const animals = ['tiger','wolf','lion','hawk','eagle','panther','fox','bear','shark'];
+    const adj = adjectives[Math.floor(Math.random()*adjectives.length)];
+    const animal = animals[Math.floor(Math.random()*animals.length)];
+    const num = Math.floor(Math.random()*900)+100;
+    return `${adj}_${animal}_${num}`;
+  }
+
+  // Ensure auth session exists (anonymous sign-in)
   private async ensureAuthSession(): Promise<string> {
-    // Returns auth.uid(); signs in anonymously if needed.
     const { data: { session } } = await supabase.auth.getSession();
     if (session?.user?.id) return session.user.id;
 
     const { data, error } = await supabase.auth.signInAnonymously();
-    if (error || !data.user) {
+    if (error || !data?.user) {
       throw new Error(`Failed to start auth session: ${error?.message || 'Unknown error'}`);
     }
     return data.user.id;
   }
 
-  private async createOrFetchProfileForAuthUser(authUid: string, username?: string, gender?: string, bio?: string): Promise<UserProfile> {
-    // Try fetch existing
-    const { data: existing, error: fetchErr } = await supabase
-      .from('profiles')
-      .select('*')
-      .eq('id', authUid)
-      .maybeSingle();
-
-    if (fetchErr) {
-      console.warn('profiles fetch error:', fetchErr);
-    }
-    if (existing) return existing as UserProfile;
-
-    // Need username for new profile
-    // username optional when restoring profile
-    if (!username) {
-      return existing as UserProfile;
-    }
-
+  // Create profile row in DB (app-driven)
+  private async createProfileForAuthUser(authUid: string): Promise<UserProfile> {
+    // generate keys and identifiers
     const keyPair = this.encryptionManager.generateKeyPair();
-    if (!keyPair?.publicKey || !keyPair?.privateKey) throw new Error('Failed to generate key pair');
-
+    if (!keyPair?.publicKey || !keyPair?.privateKey) {
+      throw new Error('Failed to generate key pair');
+    }
     const appUserId = await this.generateUniqueUserId();
+    const username = this.generateRandomUsername();
+    const token = (crypto && (crypto as any).randomUUID) ? (crypto as any).randomUUID() : ('tk_' + Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+
+    const payload: Partial<UserProfile> = {
+      id: authUid,
+      user_id: appUserId,
+      username,
+      public_key: keyPair.publicKey,
+      token,
+      created_at: new Date().toISOString()
+    };
 
     const { data: created, error: insertErr } = await supabase
       .from('profiles')
-      .insert({
-        id: authUid,             // IMPORTANT: link to auth.users.id
-        user_id: appUserId,
-        username,
-        gender,
-        bio,
-        public_key: keyPair.publicKey,
-      })
+      .insert(payload)
       .select()
       .single();
 
@@ -115,84 +113,78 @@ export class AuthManager {
       throw new Error(`Failed to create user profile: ${insertErr?.message || 'Unknown error'}`);
     }
 
-    // Persist keys + profile locally
+    // persist private key + profile locally
     await AsyncStorage.multiSet([
       ['private_key', keyPair.privateKey],
-      ['user_profile', JSON.stringify(created)],
+      ['user_profile', JSON.stringify(created)]
     ]);
 
+    // set local encryption manager private key
+    this.encryptionManager.setKeyPair({ publicKey: created.public_key, privateKey: keyPair.privateKey });
+
     return created as UserProfile;
+  }
+
+  // Fetch profile
+  private async fetchProfile(authUid: string): Promise<UserProfile | null> {
+    const { data, error } = await supabase.from('profiles').select('*').eq('id', authUid).maybeSingle();
+    if (error) {
+      console.warn('fetchProfile error', error);
+      return null;
+    }
+    return data as UserProfile || null;
   }
 
   private startSessionRefresh(): void {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     this.refreshTimer = setInterval(async () => {
-      if (this.currentUser) await this.updateLastActivity(this.currentUser.id);
+      if (this.currentUser) await this.updateLastActivity(this.currentUser.id!);
     }, 24 * 60 * 60 * 1000);
   }
 
   // --- public api ------------------------------------------------------------
 
-  /**
-   * Register (or init) the user:
-   * - Ensures a Supabase Auth session (anonymous sign-in).
-   * - Creates a profile row if it doesn't exist (id == auth.uid()).
-   * - Generates & stores encryption keys.
-   */
-  async register(username: string, gender?: string, bio?: string): Promise<UserProfile> {
-    this.validateUsername(username);
-
-    // Ensure auth session (anonymous)
+  // Sign in (anonymous) and ensure profile exists (app-managed)
+  async signInAndEnsureProfile(): Promise<UserProfile> {
     const authUid = await this.ensureAuthSession();
 
-    // Create or fetch profile bound to authUid
-    const profile = await this.createOrFetchProfileForAuthUser(authUid, username, gender, bio);
+    // fetch existing
+    const existing = await this.fetchProfile(authUid);
+    if (existing) {
+      this.currentUser = existing;
+      // restore private key if stored
+      const privateKey = await AsyncStorage.getItem('private_key');
+      if (privateKey) this.encryptionManager.setKeyPair({ publicKey: (existing as any).public_key, privateKey });
+      await AsyncStorage.setItem('user_session', JSON.stringify({ profile: existing, timestamp: Date.now(), expiresAt: Date.now() + 30*24*3600*1000 }));
+      this.startSessionRefresh();
+      await markActive(authUid).catch(()=>{});
+      return existing;
+    }
 
-    // Store a lightweight app session (optional, for UI restore)
-    const sessionStamp = {
-      profile,
-      timestamp: Date.now(),
-      // 30 days soft expiration for local UI; auth session is handled by supabase-js
-      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
-    };
-    await AsyncStorage.setItem('user_session', JSON.stringify(sessionStamp));
+    // create new profile (app controlled)
+    const created = await this.createProfileForAuthUser(authUid);
+    this.currentUser = created;
+    await AsyncStorage.setItem('user_session', JSON.stringify({ profile: created, timestamp: Date.now(), expiresAt: Date.now() + 30*24*3600*1000 }));
+    this.startSessionRefresh();
+    await markActive(authUid).catch(()=>{});
+    return created;
+  }
 
+  // Restore user from existing auth session (no profile creation)
+  async loginWithSession(): Promise<UserProfile | null> {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user?.id) return null;
+    const profile = await this.fetchProfile(session.user.id);
+    if (!profile) return null;
     this.currentUser = profile;
+    const privateKey = await AsyncStorage.getItem('private_key');
+    if (privateKey) this.encryptionManager.setKeyPair({ publicKey: (profile as any).public_key, privateKey });
+    await markActive(profile.id).catch(()=>{});
     this.startSessionRefresh();
     return profile;
   }
 
-  /**
-   * Restore user from Supabase auth session.
-   * If a profile does not exist for the auth user, returns null (call register to create).
-   */
-  async loginWithSession(): Promise<UserProfile | null> {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session?.user?.id) return null;
-
-    // Fetch profile by auth uid
-    const { data: profile, error } = await supabase.from('profiles').select('*').eq('id', session.user.id).maybeSingle();
-    if (error) {
-      console.warn('loginWithSession: profile fetch error', error);
-      return null;
-    }
-    if (!profile) {
-      // Auth exists but profile missing – user must go through register(username)
-      return null;
-    }
-
-    // Restore private key if stored
-    const privateKey = await AsyncStorage.getItem('private_key');
-    if (privateKey) {
-      this.encryptionManager.setKeyPair({ publicKey: (profile as any).public_key, privateKey });
-    }
-
-    // Update activity + local stamp
-    await this.updateLastActivity(session.user.id);
-    await AsyncStorage.setItem('user_session', JSON.stringify({ profile, timestamp: Date.now(), expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 }));
-
-    this.currentUser = profile as UserProfile;
-    this.startSessionRefresh();
+  getCurrentUser(): UserProfile | null {
     return this.currentUser;
   }
 
@@ -204,22 +196,20 @@ export class AuthManager {
     }
   }
 
-  getCurrentUser(): UserProfile | null {
-    return this.currentUser;
-  }
-
   async logout(): Promise<void> {
     try {
       if (this.refreshTimer) {
         clearInterval(this.refreshTimer);
         this.refreshTimer = null;
       }
-      await supabase.auth.signOut(); // clear supabase session
-      await AsyncStorage.multiRemove(['user_session', 'private_key', 'user_profile']);
+      await supabase.auth.signOut();
+      await AsyncStorage.multiRemove(['user_session','private_key','user_profile']);
       this.currentUser = null;
       this.encryptionManager.clearKeys();
-    } catch (error) {
-      throw new Error(`Logout failed: ${error}`);
+    } catch (e) {
+      console.warn('logout failed', e);
     }
   }
 }
+
+export default AuthManager;
