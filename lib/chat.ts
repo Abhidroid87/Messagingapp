@@ -709,7 +709,7 @@ export class ChatManager {
 
     try {
       // Fallback to local storage
-      const userChats = Array.from(this.chats.values())
+      let userChats = Array.from(this.chats.values())
         .filter(chat => chat.participants.includes(currentUser.id))
         .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
       
@@ -726,7 +726,7 @@ export class ChatManager {
       if (chatsError) {
         console.error('Error fetching chats:', chatsError);
         // Fallback to local storage
-        const userChats = Array.from(this.chats.values())
+        let userChats = Array.from(this.chats.values())
           .filter(chat => chat.participants.includes(currentUser.id))
           .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
         return userChats;
@@ -735,7 +735,7 @@ export class ChatManager {
       if (!chatData) return [];
 
       // Convert to Chat interface and get all participants for each chat
-      const userChats: Chat[] = [];
+      userChats = [];
       
       for (const chat of chatData) {
         // Get all participants for this chat
@@ -769,7 +769,7 @@ export class ChatManager {
     } catch (error) {
       console.error('Failed to get chats:', error);
       // Fallback to local storage
-      const userChats = Array.from(this.chats.values())
+      let userChats = Array.from(this.chats.values())
         .filter(chat => chat.participants.includes(currentUser.id))
         .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
       return userChats;
