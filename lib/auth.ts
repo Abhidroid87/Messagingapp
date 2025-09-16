@@ -218,4 +218,11 @@ export class AuthManager {
   }
 }
 
-export default AuthManager;
+const authManager = AuthManager.getInstance();
+export default authManager;
+
+
+// Compatibility helper: static-like register()
+export async function register(): Promise<UserProfile> {
+  return await AuthManager.getInstance().signInAndEnsureProfile();
+}
