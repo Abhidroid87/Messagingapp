@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -9,14 +9,90 @@ import {
 } from 'react-native';
 import { router } from 'expo-router';
 import { useAuth } from '@/contexts/AuthContext';
-import { MessageCircle, Users, Shield, Info, Plus, Search } from 'lucide-react-native';
+import { MessageCircle, Users, Plus, Search } from 'lucide-react-native';
 import { ChatManager, Chat } from '@/lib/chat';
 
 export default function HomeScreen() {
   const { user } = useAuth();
-  const [chats, setChats] = React.useState<Chat[]>([]);
-  const [loading, setLoading] = React.useState(true);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [loading, setLoading] = useState(true);
   const chatManager = ChatManager.getInstance();
+
+  // Always call hooks – never return before them
+  useEffect(() => {
+    if (user) {
+      loadChats();
+    } else {
+      setLoading(false); // stop loading if no user
+    }
+  }, [user]);
+
+  const loadChats = async () => {
+    try {
+      const userChats = await chatManager.getUserChats();
+      setChats(userChats);
+    } catch (error) {
+      console.error('Failed to load chats:', error);
+      if (error instanceof Error && error.message.includes('session')) {
+        // Delay navigation until after mount
+        setTimeout(() => {
+          router.push('/(auth)/welcome');
+        }, 0);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreateChat = () => {
+    Alert.alert('New Chat', 'Choose chat type', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Direct Message', onPress: () => router.push('/(tabs)/contacts') },
+      { text: 'Group Chat', onPress: () => console.log('Create group') },
+    ]);
+  };
+
+  const renderChatItem = ({ item }: { item: Chat }) => (
+    <TouchableOpacity
+      style={styles.chatItem}
+      onPress={() => console.log('Open chat:', item.id)}
+    >
+      <View style={styles.chatAvatar}>
+        <Text style={styles.chatInitial}>
+          {item.name ? item.name.charAt(0).toUpperCase() : 'C'}
+        </Text>
+      </View>
+
+      <View style={styles.chatInfo}>
+        <Text style={styles.chatName}>
+          {item.name || `Chat ${item.id.slice(0, 8)}`}
+        </Text>
+        <Text style={styles.chatPreview}>
+          {item.is_group ? 'Group Chat' : 'Direct Message'}
+        </Text>
+        <Text style={styles.chatTime}>
+          {new Date(item.updated_at).toLocaleDateString()}
+        </Text>
+      </View>
+
+      <View style={styles.chatMeta}>
+        {item.is_group && (
+          <View style={styles.groupBadge}>
+            <Users size={12} color="#666" />
+          </View>
+        )}
+      </View>
+    </TouchableOpacity>
+  );
+
+  // Conditional rendering happens here, not before hooks
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <Text style={styles.loadingText}>Loading chats...</Text>
+      </View>
+    );
+  }
 
   if (!user) {
     return (
@@ -32,71 +108,23 @@ export default function HomeScreen() {
     );
   }
 
-  React.useEffect(() => {
-    if (user) {
-      loadChats();
-    }
-  }, [user]);
-
-  const loadChats = async () => {
-    try {
-      const userChats = await chatManager.getUserChats();
-      setChats(userChats);
-    } catch (error) {
-      console.error('Failed to load chats:', error);
-      if (error instanceof Error && error.message.includes('session')) {
-        // Session expired, redirect to login
-        router.push('/(auth)/welcome');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCreateChat = () => {
-    Alert.alert(
-      'New Chat',
-      'Choose chat type',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Direct Message', onPress: () => router.push('/(tabs)/contacts') },
-        { text: 'Group Chat', onPress: () => console.log('Create group') },
-      ]
+  if (chats.length === 0) {
+    return (
+      <View style={styles.emptyContainer}>
+        <MessageCircle size={80} color="#ddd" />
+        <Text style={styles.emptyTitle}>No chats yet</Text>
+        <Text style={styles.emptyText}>
+          Start a conversation by finding contacts or creating a group
+        </Text>
+        <TouchableOpacity
+          style={styles.startChatButton}
+          onPress={() => router.push('/(tabs)/contacts')}
+        >
+          <Text style={styles.startChatButtonText}>Find Contacts</Text>
+        </TouchableOpacity>
+      </View>
     );
-  };
-
-  const renderChatItem = ({ item }: { item: Chat }) => (
-    <TouchableOpacity
-      style={styles.chatItem}
-      onPress={() => console.log('Open chat:', item.id)}
-    >
-      <View style={styles.chatAvatar}>
-        <Text style={styles.chatInitial}>
-          {item.name ? item.name.charAt(0).toUpperCase() : 'C'}
-        </Text>
-      </View>
-      
-      <View style={styles.chatInfo}>
-        <Text style={styles.chatName}>
-          {item.name || `Chat ${item.id.slice(0, 8)}`}
-        </Text>
-        <Text style={styles.chatPreview}>
-          {item.is_group ? 'Group Chat' : 'Direct Message'}
-        </Text>
-        <Text style={styles.chatTime}>
-          {new Date(item.updated_at).toLocaleDateString()}
-        </Text>
-      </View>
-      
-      <View style={styles.chatMeta}>
-        {item.is_group && (
-          <View style={styles.groupBadge}>
-            <Users size={12} color="#666" />
-          </View>
-        )}
-      </View>
-    </TouchableOpacity>
-  );
+  }
 
   return (
     <View style={styles.container}>
@@ -106,42 +134,28 @@ export default function HomeScreen() {
           <Text style={styles.headerSubtitle}>End-to-end encrypted</Text>
         </View>
         <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.headerButton} onPress={() => router.push('/(tabs)/contacts')}>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={() => router.push('/(tabs)/contacts')}
+          >
             <Search size={24} color="#2563eb" />
           </TouchableOpacity>
-          <TouchableOpacity style={styles.headerButton} onPress={handleCreateChat}>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={handleCreateChat}
+          >
             <Plus size={24} color="#2563eb" />
           </TouchableOpacity>
         </View>
       </View>
 
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading chats...</Text>
-        </View>
-      ) : chats.length === 0 ? (
-        <View style={styles.emptyContainer}>
-          <MessageCircle size={80} color="#ddd" />
-          <Text style={styles.emptyTitle}>No chats yet</Text>
-          <Text style={styles.emptyText}>
-            Start a conversation by finding contacts or creating a group
-          </Text>
-          <TouchableOpacity
-            style={styles.startChatButton}
-            onPress={() => router.push('/(tabs)/contacts')}
-          >
-            <Text style={styles.startChatButtonText}>Find Contacts</Text>
-          </TouchableOpacity>
-        </View>
-      ) : (
-        <FlatList
-          data={chats}
-          renderItem={renderChatItem}
-          keyExtractor={(item) => item.id}
-          style={styles.chatsList}
-          showsVerticalScrollIndicator={false}
-        />
-      )}
+      <FlatList
+        data={chats}
+        renderItem={renderChatItem}
+        keyExtractor={(item) => item.id}
+        style={styles.chatsList}
+        showsVerticalScrollIndicator={false}
+      />
     </View>
   );
 }
