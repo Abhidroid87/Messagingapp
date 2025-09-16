@@ -144,6 +144,12 @@ export class AuthManager {
 
   // --- public api ------------------------------------------------------------
 
+  // Legacy alias for compatibility (register -> signInAndEnsureProfile)
+  async register(): Promise<UserProfile> {
+    return await this.signInAndEnsureProfile();
+  }
+
+
   // Sign in (anonymous) and ensure profile exists (app-managed)
   async signInAndEnsureProfile(): Promise<UserProfile> {
     const authUid = await this.ensureAuthSession();
