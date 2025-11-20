@@ -194,6 +194,37 @@ export class AuthManager {
     return this.currentUser;
   }
 
+  async getCurrentUserSafe(): Promise<UserProfile> {
+    if (!this.currentUser) {
+      throw new Error('No authenticated user. Please log in first.');
+    }
+    return this.currentUser;
+  }
+
+  async deleteProfile(): Promise<void> {
+    if (!this.currentUser) {
+      throw new Error('No authenticated user');
+    }
+
+    try {
+      // Delete profile from database
+      const { error } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', this.currentUser.id);
+
+      if (error) {
+        throw new Error(`Failed to delete profile: ${error.message}`);
+      }
+
+      // Sign out and clear local data
+      await this.logout();
+    } catch (error) {
+      console.error('Delete profile error:', error);
+      throw error;
+    }
+  }
+
   async updateLastActivity(profileId: string): Promise<void> {
     try {
       await supabase.rpc('update_last_activity', { profile_id: profileId });
